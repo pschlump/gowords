@@ -12,30 +12,41 @@ import (
 	"unicode/utf8"
 )
 
-// A Writer writes records to a CSV encoded file.
+// A Writer writes records using a blank-separated (or delimited) encoding that is
+// the inverse of Reader.
 //
-// As returned by NewWriter, a Writer writes records terminated by a
-// newline and uses ',' as the field delimiter.  The exported fields can be
-// changed to customize the details before the first call to Write or WriteAll.
+// As returned by NewWriter, a Writer writes records terminated by a newline and
+// uses ' ' (space) as the field delimiter, matching Reader's default so that
+// read→write round-trips stay whitespace-delimited. The exported fields can be
+// changed before the first call to Write or WriteAll to customize the details.
 //
-// Comma is the field delimiter.
+//   - Comma is the field delimiter. It defaults to ' ' (space); set it to ',' or
+//     ';' to emit CSV-style output.
+//   - UseCRLF, if true, ends each record with \r\n instead of \n.
 //
-// If UseCRLF is true, the Writer ends each record with \r\n instead of \n.
+// A field is automatically enclosed in double quotes (with embedded quotes
+// doubled, and embedded newlines preserved) when it is empty, contains the
+// delimiter, a quote, a carriage return, a newline, or begins with whitespace.
+//
+// Writes are buffered. Call Flush (or WriteAll, which flushes for you) to ensure
+// all data has been propagated to the underlying io.Writer, then call Error to
+// check for any write error.
 type Writer struct {
-	Comma   rune // Field delimiter (set to ',' by NewWriter)
+	Comma   rune // Field delimiter (set to ' ' by NewWriter)
 	UseCRLF bool // True to use \r\n as the line terminator
 	w       *bufio.Writer
 }
 
-// NewWriter returns a new Writer that writes to w.
+// NewWriter returns a new Writer that writes to w, configured to match Reader's
+// default: the field delimiter is set to ' ' (space).
 func NewWriter(w io.Writer) *Writer {
 	return &Writer{
-		Comma: ',',
+		Comma: ' ',
 		w:     bufio.NewWriter(w),
 	}
 }
 
-// Writer writes a single CSV record to w along with any necessary quoting.
+// Write writes a single record to w along with any necessary quoting.
 // A record is a slice of strings with each string being one field.
 func (w *Writer) Write(record []string) (err error) {
 	for n, field := range record {
@@ -103,7 +114,7 @@ func (w *Writer) Error() error {
 	return err
 }
 
-// WriteAll writes multiple CSV records to w using Write and then calls Flush.
+// WriteAll writes multiple records to w using Write and then calls Flush.
 func (w *Writer) WriteAll(records [][]string) (err error) {
 	for _, record := range records {
 		err = w.Write(record)
@@ -115,8 +126,8 @@ func (w *Writer) WriteAll(records [][]string) (err error) {
 }
 
 // fieldNeedsQuotes returns true if our field must be enclosed in quotes.
-// Empty fields, files with a Comma, fields with a quote or newline, and
-// fields which start with a space must be enclosed in quotes.
+// Empty fields, fields containing the Comma, a quote or a newline, and
+// fields which start with whitespace must be enclosed in quotes.
 func (w *Writer) fieldNeedsQuotes(field string) bool {
 	if len(field) == 0 || strings.IndexRune(field, w.Comma) >= 0 || strings.IndexAny(field, "\"\r\n") >= 0 {
 		return true

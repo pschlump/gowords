@@ -2,62 +2,83 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// Package words reads and writes blank-separated (whitespace-delimited) values.
 //
-// Modified from "csv" by Philip Schlump, 2014 to allow:
-// 1. White space regular expression for a separator
-// 2. Defaults for read/write of words from text
-// 3. Config to use \ as escape char for quotes instead of ""
-// 4. Renamed to "words" to reflect these changes
+// It is derived from the standard library's encoding/csv and retuned so that the
+// default behavior is splitting records on the space character — intended as a
+// rudimentary lexer for the front end of an interpreter. The configurable Reader
+// and Writer types also support an arbitrary single-rune delimiter, quoted fields,
+// and comments, so the package can fall back to ordinary comma- or
+// semicolon-separated behavior when needed.
 //
-
-// Package words reads and writes blank-separated values files.  This is
-// intended to be a rudimentary parser for the front end of an interpreter.
+// # Input format
 //
-// A csv file contains zero or more records of one or more fields per record.
-// Each record is separated by the newline character. The final record may
-// optionally be followed by a newline character.
+// A file contains zero or more records of one or more fields per record. Each
+// record is separated by the newline character. The final record may optionally
+// be followed by a trailing newline.
 //
-//	field1,field2,field3
+// By default the field delimiter is the single space character (' ') and
+// leading whitespace is trimmed, so runs of spaces separate fields:
 //
-// White space is considered part of a field.		// xyzzy					-- Ignore white spaces - change this.
-// White space is not considered part of a field.
-//
-// Carriage returns before newline characters are silently removed.
-//
-// Blank lines are ignored.  A line with only whitespace characters (excluding
-// the ending newline character) is not considered a blank line.				// xyzzy		-- change this.  Make whitespace liens blank lines
-// the ending newline character) is considered a blank line.
-//
-// Fields which start and stop with the quote character " are called
-// quoted-fields.  The beginning and ending quote are not part of the
-// field.
-//
-// The source:
-//
-//	normal string,"quoted-field"
+//	field1 field2 field3
 //
 // results in the fields
 //
-//	{`normal string`, `quoted-field`}
+//	{`field1`, `field2`, `field3`}
 //
-// Within a quoted-field a quote character followed by a second quote
-// character is considered a single quote.
+// Only the delimiter rune separates fields. Other whitespace inside a field —
+// most notably the tab character — is preserved as field content, although
+// whitespace at the start of a field is trimmed. So the input "a\tb" (a, tab, b)
+// is a single field, not two. To tokenize on arbitrary whitespace, set Comma to
+// each separator in turn, or pre-process the input.
 //
-//	"the ""word"" is true","a ""quoted-field"""
+// Carriage returns before a newline are silently folded to a single newline.
+//
+// A truly empty line (containing only the newline) is ignored. A line that
+// contains only whitespace, however, is not blank in this sense: it yields a
+// record with a single empty field ([""]).
+//
+// Fields which start and end with the quote character " are called quoted fields.
+// The opening and closing quotes are not part of the field.
+//
+//	normal-string "quoted-field"
+//
+// results in the fields
+//
+//	{`normal-string`, `quoted-field`}
+//
+// Within a quoted field, a quote character immediately followed by a second quote
+// is treated as a single literal quote.
+//
+//	"the ""word"" is true" "a ""quoted-field"""
 //
 // results in
 //
 //	{`the "word" is true`, `a "quoted-field"`}
 //
-// Newlines and commas may be included in a quoted-field
+// Newlines and the delimiter character may be included inside a quoted field:
 //
-//	"Multi-line
-//	field","comma is ,"
+//	"multi-line
+//	field" "space is  "
 //
 // results in
 //
-//	{`Multi-line
-//	field`, `comma is ,`}
+//	{`multi-line
+//	field`, `space is  `}
+//
+// # Errors
+//
+// Parse errors carry a 1-based line number and 0-based column (rune index). The
+// underlying error is reachable via errors.Is and errors.As thanks to ParseError's
+// Unwrap method, so callers can test for the sentinel errors declared in this
+// package:
+//
+//	r := words.NewReader(strings.NewReader(input))
+//	if _, err := r.Read(); err != nil {
+//	    if errors.Is(err, words.ErrFieldCount) {
+//	        // ...handle a field-count mismatch...
+//	    }
+//	}
 package words
 
 import (
@@ -70,7 +91,7 @@ import (
 )
 
 // A ParseError is returned for parsing errors.
-// The first line is 1.  The first column is 0.
+// Line numbers are 1-based; columns are 0-based rune indices.
 type ParseError struct {
 	Line   int   // Line where the error occurred
 	Column int   // Column (rune index) where the error occurred
@@ -81,39 +102,47 @@ func (e *ParseError) Error() string {
 	return fmt.Sprintf("line %d, column %d: %s", e.Line, e.Column, e.Err)
 }
 
-// These are the errors that can be returned in ParseError.Error
+// Unwrap returns the underlying error, allowing errors.Is and errors.As to match
+// the sentinel errors declared in this package (for example ErrFieldCount).
+func (e *ParseError) Unwrap() error {
+	return e.Err
+}
+
+// These are the errors that can be returned as the inner error of a ParseError.
 var (
-	ErrTrailingComma = errors.New("extra delimiter at end of line") // no longer used
-	ErrBareQuote     = errors.New("bare \" in non-quoted-field")
-	ErrQuote         = errors.New("extraneous \" in field")
-	ErrFieldCount    = errors.New("wrong number of fields in line")
+	// ErrTrailingComma is retained for compatibility but is no longer returned by
+	// the reader; trailing delimiters simply produce a final empty field.
+	//
+	// Deprecated: not returned since the csv fork; do not rely on it.
+	ErrTrailingComma = errors.New("extra delimiter at end of line")
+
+	ErrBareQuote  = errors.New("bare \" in non-quoted-field")
+	ErrQuote      = errors.New("extraneous \" in field")
+	ErrFieldCount = errors.New("wrong number of fields in line")
 )
 
-// A Reader reads records from a CSV-encoded file.
+// A Reader reads records from a blank-separated (or delimited) file.
 //
-// As returned by NewReader, a Reader expects input conforming to RFC 4180.
-// The exported fields can be changed to customize the details before the
-// first call to Read or ReadAll.
+// As returned by NewReader, a Reader splits records on the space character: the
+// field delimiter is a space, leading whitespace is trimmed, and records may
+// contain a variable number of fields. The exported fields can be changed before
+// the first call to Read or ReadAll to customize the details.
 //
-// Comma is the field delimiter.  It defaults to ','.
-//
-// Comment, if not 0, is the comment character. Lines beginning with the
-// Comment character are ignored.
-//
-// If FieldsPerRecord is positive, Read requires each record to
-// have the given number of fields.  If FieldsPerRecord is 0, Read sets it to
-// the number of fields in the first record, so that future records must
-// have the same field count.  If FieldsPerRecord is negative, no check is
-// made and records may have a variable number of fields.
-//
-// If LazyQuotes is true, a quote may appear in an unquoted field and a
-// non-doubled quote may appear in a quoted field.
-//
-// If TrimLeadingSpace is true, leading white space in a field is ignored.
+//   - Comma is the field delimiter. It defaults to ' ' (space).
+//   - Comment, if non-zero, is the comment character. Lines beginning with it are
+//     ignored. It defaults to 0 (no comments).
+//   - FieldsPerRecord governs field-count validation. If positive, Read requires
+//     each record to have exactly that many fields. If 0, Read sets it to the
+//     number of fields in the first record, so subsequent records must match. If
+//     negative (the default), no check is made and records may vary in length.
+//   - LazyQuotes, if true, allows a quote to appear in an unquoted field and a
+//     non-doubled quote to appear in a quoted field.
+//   - TrimLeadingSpace, if true (the default), ignores leading whitespace in a
+//     field.
 type Reader struct {
-	Comma            rune // field delimiter (set to ',' by NewReader)					// xyzzy - allow white space as a delim
-	Comment          rune // comment character for start of line
-	FieldsPerRecord  int  // number of expected fields per record
+	Comma            rune // field delimiter (set to ' ' by NewReader)
+	Comment          rune // comment character for start of line, or 0
+	FieldsPerRecord  int  // expected fields per record (see type doc)
 	LazyQuotes       bool // allow lazy quotes
 	TrimLeadingSpace bool // trim leading space
 	line             int
@@ -122,10 +151,12 @@ type Reader struct {
 	field            bytes.Buffer
 }
 
-// NewReader returns a new Reader that reads from r.
+// NewReader returns a new Reader that reads from r, configured for whitespace
+// tokenization: Comma is set to ' ', TrimLeadingSpace to true, and
+// FieldsPerRecord to -1 (variable field counts allowed).
 func NewReader(r io.Reader) *Reader {
 	return &Reader{
-		Comma:            ' ', // xyzzy - change to be a white space RE for sep.
+		Comma:            ' ',
 		FieldsPerRecord:  -1,
 		TrimLeadingSpace: true,
 		r:                bufio.NewReader(r),
@@ -141,7 +172,7 @@ func (r *Reader) error(err error) error {
 	}
 }
 
-// Read reads one record from r.  The record is a slice of strings with each
+// Read reads one record from r. The record is a slice of strings with each
 // string representing one field.
 func (r *Reader) Read() (record []string, err error) {
 	for {
@@ -184,12 +215,12 @@ func (r *Reader) ReadAll() (records [][]string, err error) {
 }
 
 // readRune reads one rune from r, folding \r\n to \n and keeping track
-// of how far into the line we have read.  r.column will point to the start
+// of how far into the line we have read. r.column will point to the start
 // of this rune, not the end of this rune.
 func (r *Reader) readRune() (rune, error) {
 	r1, _, err := r.r.ReadRune()
 
-	// Handle \r\n here.  We make the simplifying assumption that
+	// Handle \r\n here. We make the simplifying assumption that
 	// anytime \r is followed by \n that it can be folded to \n.
 	// We will not detect files which contain both \r\n and bare \n.
 	if r1 == '\r' {
@@ -224,18 +255,17 @@ func (r *Reader) skip(delim rune) error {
 	}
 }
 
-// parseRecord reads and parses a single csv record from r.
+// parseRecord reads and parses a single record from r.
 func (r *Reader) parseRecord() (fields []string, err error) {
-	// Each record starts on a new line.  We increment our line
+	// Each record starts on a new line. We increment our line
 	// number (lines start at 1, not 0) and set column to -1
 	// so as we increment in readRune it points to the character we read.
 	r.line++
 	r.column = -1
 
-	// Peek at the first rune.  If it is an error we are done.
-	// If we are support comments and it is the comment character
+	// Peek at the first rune. If it is an error we are done.
+	// If we support comments and it is the comment character,
 	// then skip to the end of line.
-
 	r1, _, err := r.r.ReadRune()
 	if err != nil {
 		return nil, err
@@ -260,8 +290,8 @@ func (r *Reader) parseRecord() (fields []string, err error) {
 	}
 }
 
-// parseField parses the next field in the record.  The read field is
-// located in r.field.  Delim is the first character not part of the field
+// parseField parses the next field in the record. The read field is
+// located in r.field. Delim is the first character not part of the field
 // (r.Comma or '\n').
 func (r *Reader) parseField() (haveField bool, delim rune, err error) {
 	r.field.Reset()
@@ -288,10 +318,6 @@ func (r *Reader) parseField() (haveField bool, delim rune, err error) {
 			return false, r1, nil
 		}
 		return true, r1, nil
-
-		// xyzzy - add in ' as quote field
-		// xyzzy - add in escapes for quotes as in "abc\"def"
-		// xyzzy - test with multi line quotes
 
 	case '"':
 		// quoted field

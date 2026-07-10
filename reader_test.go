@@ -5,6 +5,7 @@
 package words
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -203,7 +204,7 @@ field"`,
 		Output: [][]string{{"a", "b", "c", " "}},
 	},
 	{
-		Name:          "CommaFieldTest",
+		Name: "CommaFieldTest",
 		Input: `x,y,z,w
 x,y,z,
 x,y,,
@@ -252,7 +253,7 @@ func TestRead(t *testing.T) {
 	for _, tt := range readTests {
 		r := NewReader(strings.NewReader(tt.Input))
 
-		r.Comma = ','										// added config to match with old "csv" defaults - to maintain tests
+		r.Comma = ',' // added config to match with old "csv" defaults - to maintain tests
 		r.FieldsPerRecord = 0
 		r.TrimLeadingSpace = false
 
@@ -280,5 +281,83 @@ func TestRead(t *testing.T) {
 		} else if !reflect.DeepEqual(out, tt.Output) {
 			t.Errorf("%s: out=%q want %q", tt.Name, out, tt.Output)
 		}
+	}
+}
+
+// readWordsTests exercises the whitespace-tokenizing behavior that NewReader
+// configures by default. Unlike readTests above, these do not override Comma,
+// so they cover the package's primary use case.
+var readWordsTests = []struct {
+	Name   string
+	Input  string
+	Output [][]string
+}{
+	{
+		Name:   "Simple",
+		Input:  "a b c\n",
+		Output: [][]string{{"a", "b", "c"}},
+	},
+	{
+		Name:   "MultipleSpacesCollapse",
+		Input:  "a    b    c\n",
+		Output: [][]string{{"a", "b", "c"}},
+	},
+	{
+		Name:   "LeadingSpaceTrimmed",
+		Input:  "   a b\n",
+		Output: [][]string{{"a", "b"}},
+	},
+	{
+		Name:   "QuotedPhrase",
+		Input:  "\"hello world\" foo\n",
+		Output: [][]string{{"hello world", "foo"}},
+	},
+	{
+		// FieldsPerRecord defaults to -1, so records may vary in length.
+		Name:   "VariableFieldCounts",
+		Input:  "a b\nc d e\n",
+		Output: [][]string{{"a", "b"}, {"c", "d", "e"}},
+	},
+	{
+		// Only the delimiter rune (space) separates fields; a tab is content.
+		Name:   "TabIsNotDelimiter",
+		Input:  "a\tb c\n",
+		Output: [][]string{{"a\tb", "c"}},
+	},
+}
+
+func TestReadWords(t *testing.T) {
+	for _, tt := range readWordsTests {
+		// Use NewReader defaults directly, with no configuration overrides.
+		r := NewReader(strings.NewReader(tt.Input))
+		out, err := r.ReadAll()
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", tt.Name, err)
+			continue
+		}
+		if !reflect.DeepEqual(out, tt.Output) {
+			t.Errorf("%s: out=%q want %q", tt.Name, out, tt.Output)
+		}
+	}
+}
+
+// TestParseErrorUnwrap verifies that ParseError exposes its inner sentinel error
+// via Unwrap, so callers can use errors.Is and errors.As.
+func TestParseErrorUnwrap(t *testing.T) {
+	r := NewReader(strings.NewReader(`a"b`)) // bare quote in an unquoted field
+	_, err := r.Read()
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+
+	var pe *ParseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected *ParseError, got %T (%v)", err, err)
+	}
+	if !errors.Is(err, ErrBareQuote) {
+		t.Errorf("errors.Is(err, ErrBareQuote) = false, want true (err=%v)", err)
+	}
+	if !errors.Is(err, pe.Err) {
+		t.Errorf("errors.Is(err, pe.Err) = false, want true (err=%v)", err)
 	}
 }
