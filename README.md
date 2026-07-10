@@ -52,18 +52,49 @@ all, err := words.NewReader(stdin).ReadAll()
 Tune a `Reader` by changing its exported fields before the first call to `Read`
 or `ReadAll`:
 
-| Field              | Default | Meaning                                                                   |
-| ------------------ | ------- | ------------------------------------------------------------------------- |
-| `Comma`            | `' '`   | Field delimiter. Set to `','` for ordinary CSV.                           |
-| `Comment`          | `0`     | If non-zero, lines beginning with this rune are skipped.                  |
-| `FieldsPerRecord`  | `-1`    | If `>0`, require exactly that many fields; `0` locks to the first record. |
-| `LazyQuotes`       | `false` | Tolerate quotes in unquoted fields and non-doubled quotes.                |
-| `TrimLeadingSpace` | `true`  | Trim whitespace before each field.                                        |
+| Field               | Default | Meaning                                                                   |
+| ------------------- | ------- | ------------------------------------------------------------------------- |
+| `Comma`             | `' '`   | Field delimiter. Set to `','` for ordinary CSV.                           |
+| `Comment`           | `0`     | If non-zero, lines beginning with this rune are skipped.                  |
+| `FieldsPerRecord`   | `-1`    | If `>0`, require exactly that many fields; `0` locks to the first record. |
+| `LazyQuotes`        | `false` | Tolerate quotes in unquoted fields and non-doubled quotes.                |
+| `TrimLeadingSpace`  | `true`  | Trim whitespace before each field.                                        |
+| `AllowSingleQuote`  | `false` | Also treat `'...'` as a quoted field (with `''` for a literal quote).     |
+| `BackslashEscapes`  | `false` | Recognize `\" \\ \n \t \r \'` escapes inside quoted fields.               |
 
-> **Note:** only the `Comma` rune separates fields. Other whitespace (e.g. a tab)
-> between two non-space characters is preserved as field content, though
-> whitespace at the *start* of a field is trimmed. A truly empty line is ignored;
-> a line containing only whitespace yields a single empty-field record (`[""]`).
+### Quoting and escapes
+
+Only the double quote opens a quoted field by default. Enable `AllowSingleQuote`
+to also recognize single-quoted fields, which follow the same rules (two
+adjacent single quotes stand for one literal single quote):
+
+```go
+r := words.NewReader(strings.NewReader(`'hello world' 'it''s'`))
+r.AllowSingleQuote = true
+rec, _ := r.Read()
+// rec == []string{"hello world", "it's"}
+```
+
+Enable `BackslashEscapes` to use C-style escapes inside quoted fields (`\" \\ \n
+\t \r \'`; any other `\X` is kept verbatim):
+
+```go
+r := words.NewReader(strings.NewReader(`"a\"b\nc"`))
+r.BackslashEscapes = true
+rec, _ := r.Read()
+// rec == []string{"a\"b\nc"}  // i.e. a, ", b, newline, c
+```
+
+Both options default to `false`, so apostrophes in ordinary text such as `don't`
+keep working unchanged.
+
+> **Note:** because the default delimiter is a space (whitespace), *every*
+> whitespace rune separates fields — tabs work the same as spaces, and runs of
+> tabs/spaces collapse into a single separator. Set `Comma` to a non-whitespace
+> rune (e.g. `','`) to make only that rune a delimiter, in which case tabs become
+> field content. To keep whitespace *inside* a field, quote it. A truly empty line
+> is ignored; a line containing only whitespace yields a single empty-field record
+> (`[""]`).
 
 Parse errors are `*words.ParseError` and carry a 1-based line and 0-based column.
 The underlying sentinel (`words.ErrFieldCount`, `words.ErrBareQuote`,

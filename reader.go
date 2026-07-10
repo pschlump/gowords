@@ -5,8 +5,8 @@
 // Package words reads and writes blank-separated (whitespace-delimited) values.
 //
 // It is derived from the standard library's encoding/csv and retuned so that the
-// default behavior is splitting records on the space character — intended as a
-// rudimentary lexer for the front end of an interpreter. The configurable Reader
+// default behavior is splitting records on whitespace (space and tab) — intended
+// as a rudimentary lexer for the front end of an interpreter. The configurable Reader
 // and Writer types also support an arbitrary single-rune delimiter, quoted fields,
 // and comments, so the package can fall back to ordinary comma- or
 // semicolon-separated behavior when needed.
@@ -17,20 +17,20 @@
 // record is separated by the newline character. The final record may optionally
 // be followed by a trailing newline.
 //
-// By default the field delimiter is the single space character (' ') and
-// leading whitespace is trimmed, so runs of spaces separate fields:
+// By default the field delimiter is a space and leading whitespace is trimmed.
+// Because the delimiter is itself whitespace, every other whitespace rune (most
+// usefully the tab) separates fields just as a space does, so runs of spaces and
+// tabs split records into fields:
 //
-//	field1 field2 field3
+//	field1	field2	field3
 //
 // results in the fields
 //
 //	{`field1`, `field2`, `field3`}
 //
-// Only the delimiter rune separates fields. Other whitespace inside a field —
-// most notably the tab character — is preserved as field content, although
-// whitespace at the start of a field is trimmed. So the input "a\tb" (a, tab, b)
-// is a single field, not two. To tokenize on arbitrary whitespace, set Comma to
-// each separator in turn, or pre-process the input.
+// (Set Comma to a non-whitespace rune such as ',' to switch to ordinary
+// single-delimiter behavior, in which a tab becomes field content.) Whitespace
+// inside a field is preserved by quoting the field.
 //
 // Carriage returns before a newline are silently folded to a single newline.
 //
@@ -65,6 +65,30 @@
 //
 //	{`multi-line
 //	field`, `space is  `}
+//
+// # Quoting and escapes
+//
+// By default only the double quote opens a quoted field. Set AllowSingleQuote to
+// also accept single-quoted fields, which follow the same rules, including
+// doubling (two adjacent single quotes stand for one literal single quote):
+//
+//	'single "quoted" field' 'it''s'
+//
+// results in
+//
+//	{`single "quoted" field`, `it's`}
+//
+// Set BackslashEscapes to recognize C-style backslash escapes inside quoted
+// fields. The recognized sequences are \" \\ \n \t \r and \', mapping to a quote,
+// a backslash, a newline, a tab, a carriage return, and a single quote; any other
+// \X is kept verbatim, both characters, so input that was not meant as an escape
+// is preserved. Escapes apply only inside quoted fields. With BackslashEscapes
+// enabled:
+//
+//	"a\"b\nc\td"
+//
+// yields a single field whose value is the rune sequence a, a quote, b, a newline,
+// c, a tab, d.
 //
 // # Errors
 //
@@ -110,12 +134,6 @@ func (e *ParseError) Unwrap() error {
 
 // These are the errors that can be returned as the inner error of a ParseError.
 var (
-	// ErrTrailingComma is retained for compatibility but is no longer returned by
-	// the reader; trailing delimiters simply produce a final empty field.
-	//
-	// Deprecated: not returned since the csv fork; do not rely on it.
-	ErrTrailingComma = errors.New("extra delimiter at end of line")
-
 	ErrBareQuote  = errors.New("bare \" in non-quoted-field")
 	ErrQuote      = errors.New("extraneous \" in field")
 	ErrFieldCount = errors.New("wrong number of fields in line")
@@ -123,12 +141,15 @@ var (
 
 // A Reader reads records from a blank-separated (or delimited) file.
 //
-// As returned by NewReader, a Reader splits records on the space character: the
-// field delimiter is a space, leading whitespace is trimmed, and records may
-// contain a variable number of fields. The exported fields can be changed before
-// the first call to Read or ReadAll to customize the details.
+// As returned by NewReader, a Reader splits records on whitespace: the field
+// delimiter is a space (and, because it is whitespace, tabs separate fields the
+// same way), leading whitespace is trimmed, and records may contain a variable
+// number of fields. The exported fields can be changed before the first call to
+// Read or ReadAll to customize the details.
 //
-//   - Comma is the field delimiter. It defaults to ' ' (space).
+//   - Comma is the field delimiter. It defaults to ' ' (space). When Comma is
+//     whitespace, every whitespace rune separates fields; otherwise only Comma
+//     does and other whitespace is field content.
 //   - Comment, if non-zero, is the comment character. Lines beginning with it are
 //     ignored. It defaults to 0 (no comments).
 //   - FieldsPerRecord governs field-count validation. If positive, Read requires
@@ -139,12 +160,24 @@ var (
 //     non-doubled quote to appear in a quoted field.
 //   - TrimLeadingSpace, if true (the default), ignores leading whitespace in a
 //     field.
+//   - AllowSingleQuote, if true, also treats a field wrapped in single quotes as
+//     a quoted field. The same doubling rule as for double quotes applies: a pair
+//     of adjacent single quotes stands for one literal single quote. It defaults
+//     to false, so apostrophes inside otherwise-unquoted text such as "don't" are
+//     left untouched.
+//   - BackslashEscapes, if true, recognizes backslash escape sequences inside
+//     quoted fields: \" \\ \n \t \r \' map to their usual values, and any other
+//     \X is kept literally (backslash and X), so data such as "C:\Users" is never
+//     corrupted. It defaults to false. Escapes are recognized only inside quoted
+//     fields.
 type Reader struct {
 	Comma            rune // field delimiter (set to ' ' by NewReader)
 	Comment          rune // comment character for start of line, or 0
 	FieldsPerRecord  int  // expected fields per record (see type doc)
 	LazyQuotes       bool // allow lazy quotes
 	TrimLeadingSpace bool // trim leading space
+	AllowSingleQuote bool // also treat '...' as a quoted field
+	BackslashEscapes bool // recognize \-escapes inside quoted fields
 	line             int
 	column           int
 	r                *bufio.Reader
@@ -308,69 +341,35 @@ func (r *Reader) parseField() (haveField bool, delim rune, err error) {
 		return false, 0, err
 	}
 
-	switch r1 {
-	case r.Comma:
-		// will check below
+	// A field wrapped in a quote character is parsed by parseQuotedField.
+	if q, ok := r.quoteChar(r1); ok {
+		return r.parseQuotedField(q)
+	}
 
-	case '\n':
-		// We are a trailing empty field or a blank line
+	// A leading delimiter produces an empty field.
+	if r.isDelim(r1) {
+		return true, r1, nil
+	}
+	// A trailing empty field, or a blank line.
+	if r1 == '\n' {
 		if r.column == 0 {
 			return false, r1, nil
 		}
 		return true, r1, nil
+	}
 
-	case '"':
-		// quoted field
-	Quoted:
-		for {
-			r1, err = r.readRune()
-			if err != nil {
-				if err == io.EOF {
-					if r.LazyQuotes {
-						return true, 0, err
-					}
-					return false, 0, r.error(ErrQuote)
-				}
-				return false, 0, err
-			}
-			switch r1 {
-			case '"':
-				r1, err = r.readRune()
-				if err != nil || r1 == r.Comma {
-					break Quoted
-				}
-				if r1 == '\n' {
-					return true, r1, nil
-				}
-				if r1 != '"' {
-					if !r.LazyQuotes {
-						r.column--
-						return false, 0, r.error(ErrQuote)
-					}
-					// accept the bare quote
-					r.field.WriteRune('"')
-				}
-			case '\n':
-				r.line++
-				r.column = -1
-			}
-			r.field.WriteRune(r1)
+	// unquoted field
+	for {
+		r.field.WriteRune(r1)
+		r1, err = r.readRune()
+		if err != nil || r.isDelim(r1) {
+			break
 		}
-
-	default:
-		// unquoted field
-		for {
-			r.field.WriteRune(r1)
-			r1, err = r.readRune()
-			if err != nil || r1 == r.Comma {
-				break
-			}
-			if r1 == '\n' {
-				return true, r1, nil
-			}
-			if !r.LazyQuotes && r1 == '"' {
-				return false, 0, r.error(ErrBareQuote)
-			}
+		if r1 == '\n' {
+			return true, r1, nil
+		}
+		if !r.LazyQuotes && r1 == '"' {
+			return false, 0, r.error(ErrBareQuote)
 		}
 	}
 
@@ -382,4 +381,117 @@ func (r *Reader) parseField() (haveField bool, delim rune, err error) {
 	}
 
 	return true, r1, nil
+}
+
+// isDelim reports whether r1 terminates a field. The rune r.Comma always
+// terminates a field. In addition, when Comma is itself a whitespace rune (the
+// default is a space), any other whitespace rune also terminates a field — so
+// tabs separate fields exactly the same way spaces do — except for the newline,
+// which terminates a record rather than a field. When Comma is not whitespace
+// (for example ','), only r.Comma terminates a field and other whitespace is
+// field content.
+func (r *Reader) isDelim(r1 rune) bool {
+	if r1 == r.Comma || r1 == '\n' {
+		return r1 == r.Comma
+	}
+	return unicode.IsSpace(r.Comma) && unicode.IsSpace(r1)
+}
+
+// quoteChar reports whether r1 opens a quoted field, and if so returns the quote
+// rune. The double quote always opens a quote; the single quote opens one only
+// when AllowSingleQuote is set, so by default an apostrophe such as the one in
+// don't is an ordinary character.
+func (r *Reader) quoteChar(r1 rune) (quote rune, ok bool) {
+	if r1 == '"' {
+		return '"', true
+	}
+	if r.AllowSingleQuote && r1 == '\'' {
+		return '\'', true
+	}
+	return 0, false
+}
+
+// parseQuotedField reads the body of a field opened by quote and returns when it
+// is terminated by the delimiter, a newline, or EOF. The parsed content is left
+// in r.field. The return values match parseField: haveField is true on any
+// non-error return, delim is the terminating rune (r.Comma or '\n'; 0 on EOF),
+// and err is io.EOF when the field runs to the end of input.
+func (r *Reader) parseQuotedField(quote rune) (haveField bool, delim rune, err error) {
+	for {
+		r1, err := r.readRune()
+		if err != nil {
+			if err == io.EOF {
+				if r.LazyQuotes {
+					return true, 0, err
+				}
+				return false, 0, r.error(ErrQuote)
+			}
+			return false, 0, err
+		}
+
+		// Backslash escapes are recognized only inside quoted fields.
+		if r.BackslashEscapes && r1 == '\\' {
+			esc, eerr := r.readRune()
+			if eerr != nil {
+				// Unterminated escape: a backslash at EOF or a read error.
+				// Keep the backslash, then apply the usual end-of-input rules.
+				r.field.WriteRune('\\')
+				if eerr == io.EOF {
+					if r.LazyQuotes {
+						return true, 0, eerr
+					}
+					return false, 0, r.error(ErrQuote)
+				}
+				return false, 0, eerr
+			}
+			r.field.WriteString(decodeEscape(esc))
+			continue
+		}
+
+		switch r1 {
+		case quote:
+			// Possible end of field, or a doubled quote (a literal quote).
+			next, nerr := r.readRune()
+			if nerr != nil {
+				if nerr == io.EOF {
+					return true, 0, nerr
+				}
+				return false, 0, nerr
+			}
+			if r.isDelim(next) || next == '\n' {
+				return true, next, nil
+			}
+			if next != quote {
+				if !r.LazyQuotes {
+					r.column--
+					return false, 0, r.error(ErrQuote)
+				}
+				// Lazy: accept the bare quote and continue with next.
+				r.field.WriteRune(quote)
+			}
+			r1 = next
+		case '\n':
+			r.line++
+			r.column = -1
+		}
+		r.field.WriteRune(r1)
+	}
+}
+
+// decodeEscape translates the rune following a backslash inside a quoted field
+// when BackslashEscapes is enabled. Recognized sequences map to their usual
+// values; any unrecognized sequence is returned verbatim, backslash included, so
+// data such as "C:\Users" is never altered.
+func decodeEscape(c rune) string {
+	switch c {
+	case 'n':
+		return "\n"
+	case 't':
+		return "\t"
+	case 'r':
+		return "\r"
+	case '"', '\'', '\\':
+		return string(c)
+	}
+	return "\\" + string(c)
 }

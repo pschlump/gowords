@@ -23,6 +23,8 @@ var readTests = []struct {
 	FieldsPerRecord  int
 	LazyQuotes       bool
 	TrimLeadingSpace bool
+	AllowSingleQuote bool
+	BackslashEscapes bool
 
 	Error  string
 	Line   int // Expected error line if != 0
@@ -247,6 +249,101 @@ x,,,
 			{"c", "d", "e"},
 		},
 	},
+	// Single-quote fields (opt-in via AllowSingleQuote).
+	{
+		Name:             "SingleQuote",
+		AllowSingleQuote: true,
+		Input:            "'abc'",
+		Output:           [][]string{{"abc"}},
+	},
+	{
+		Name:             "SingleQuoteSpace",
+		AllowSingleQuote: true,
+		Input:            "'a b'",
+		Output:           [][]string{{"a b"}},
+	},
+	{
+		Name:             "SingleQuoteDoubling",
+		AllowSingleQuote: true,
+		Input:            "'it''s'",
+		Output:           [][]string{{"it's"}},
+	},
+	{
+		// Without the flag, a single quote is an ordinary character.
+		Name:   "SingleQuoteDefaultFalse",
+		Input:  "'abc'",
+		Output: [][]string{{"'abc'"}},
+	},
+	{
+		// An apostrophe mid-field must never be treated as a quote, even when
+		// AllowSingleQuote is enabled.
+		Name:             "ApostropheInUnquoted",
+		AllowSingleQuote: true,
+		Input:            "don't",
+		Output:           [][]string{{"don't"}},
+	},
+	{
+		Name:             "SingleQuoteEscape",
+		AllowSingleQuote: true,
+		BackslashEscapes: true,
+		Input:            `'a\'b'`,
+		Output:           [][]string{{"a'b"}},
+	},
+	{
+		Name:             "MixedQuotes",
+		AllowSingleQuote: true,
+		Input:            `"a",'b'`,
+		Output:           [][]string{{"a", "b"}},
+	},
+	// Backslash escapes inside quoted fields (opt-in via BackslashEscapes).
+	{
+		Name:             "EscapedQuote",
+		BackslashEscapes: true,
+		Input:            `"a\"b"`,
+		Output:           [][]string{{`a"b`}},
+	},
+	{
+		Name:             "EscapedBackslash",
+		BackslashEscapes: true,
+		Input:            `"a\\b"`,
+		Output:           [][]string{{`a\b`}},
+	},
+	{
+		Name:             "EscapedNewline",
+		BackslashEscapes: true,
+		Input:            `"a\nb"`,
+		Output:           [][]string{{"a\nb"}},
+	},
+	{
+		Name:             "EscapedTab",
+		BackslashEscapes: true,
+		Input:            `"a\tb"`,
+		Output:           [][]string{{"a\tb"}},
+	},
+	{
+		Name:             "UnknownEscapeKept",
+		BackslashEscapes: true,
+		Input:            `"C:\Users"`,
+		Output:           [][]string{{`C:\Users`}},
+	},
+	{
+		Name:             "EscapeThenField",
+		BackslashEscapes: true,
+		Input:            `"a\"","b"`,
+		Output:           [][]string{{`a"`, "b"}},
+	},
+	{
+		// Without the flag, a backslash is ordinary and the bare quote errors.
+		Name:  "EscapedQuoteDefaultFalse",
+		Input: `"a\"b"`,
+		Error: `extraneous " in field`,
+	},
+	{
+		// When Comma is not whitespace, a tab is field content, not a delimiter.
+		Name:   "TabIsContentInCSVMode",
+		Input:  "a\tb,c\n",
+		Output: [][]string{{"a\tb", "c"}},
+	},
 }
 
 func TestRead(t *testing.T) {
@@ -265,6 +362,8 @@ func TestRead(t *testing.T) {
 		}
 		r.LazyQuotes = tt.LazyQuotes
 		r.TrimLeadingSpace = tt.TrimLeadingSpace
+		r.AllowSingleQuote = tt.AllowSingleQuote
+		r.BackslashEscapes = tt.BackslashEscapes
 		if tt.Comma != 0 {
 			r.Comma = tt.Comma
 		}
@@ -320,8 +419,20 @@ var readWordsTests = []struct {
 	},
 	{
 		// Only the delimiter rune (space) separates fields; a tab is content.
-		Name:   "TabIsNotDelimiter",
+		Name:   "TabIsDelimiter",
 		Input:  "a\tb c\n",
+		Output: [][]string{{"a", "b", "c"}},
+	},
+	{
+		// Runs of tabs and spaces collapse into a single separator.
+		Name:   "TabsAndSpacesCollapse",
+		Input:  "a \t b\t\tc\n",
+		Output: [][]string{{"a", "b", "c"}},
+	},
+	{
+		// A tab inside a quoted field is preserved as content.
+		Name:   "TabPreservedInQuotes",
+		Input:  "\"a\tb\" c\n",
 		Output: [][]string{{"a\tb", "c"}},
 	},
 }
@@ -359,5 +470,85 @@ func TestParseErrorUnwrap(t *testing.T) {
 	}
 	if !errors.Is(err, pe.Err) {
 		t.Errorf("errors.Is(err, pe.Err) = false, want true (err=%v)", err)
+	}
+}
+
+// readWordsQuotingTests exercises single-quote fields and backslash escapes in
+// the package's default (space-delimited) context.
+var readWordsQuotingTests = []struct {
+	Name             string
+	Input            string
+	AllowSingleQuote bool
+	BackslashEscapes bool
+	Output           [][]string
+}{
+	{
+		Name:             "SingleQuoteWord",
+		AllowSingleQuote: true,
+		Input:            "'hello world' foo\n",
+		Output:           [][]string{{"hello world", "foo"}},
+	},
+	{
+		Name:             "SingleQuoteDoubling",
+		AllowSingleQuote: true,
+		Input:            "'it''s' bar\n",
+		Output:           [][]string{{"it's", "bar"}},
+	},
+	{
+		Name:             "EscapedQuote",
+		BackslashEscapes: true,
+		Input:            `"a\"b" c` + "\n",
+		Output:           [][]string{{`a"b`, "c"}},
+	},
+	{
+		Name:             "EscapedNewline",
+		BackslashEscapes: true,
+		Input:            `"a\nb" c` + "\n",
+		Output:           [][]string{{"a\nb", "c"}},
+	},
+	{
+		Name:             "BothFeatures",
+		AllowSingleQuote: true,
+		BackslashEscapes: true,
+		Input:            `'a\'b' "c\"d"` + "\n",
+		Output:           [][]string{{"a'b", `c"d`}},
+	},
+}
+
+func TestReadWordsQuoting(t *testing.T) {
+	for _, tt := range readWordsQuotingTests {
+		r := NewReader(strings.NewReader(tt.Input))
+		r.AllowSingleQuote = tt.AllowSingleQuote
+		r.BackslashEscapes = tt.BackslashEscapes
+		out, err := r.ReadAll()
+		if err != nil {
+			t.Errorf("%s: unexpected error %v", tt.Name, err)
+			continue
+		}
+		if !reflect.DeepEqual(out, tt.Output) {
+			t.Errorf("%s: out=%#v want %#v", tt.Name, out, tt.Output)
+		}
+	}
+}
+
+// TestDecodeEscape covers the pure escape-translation helper directly.
+func TestDecodeEscape(t *testing.T) {
+	tests := []struct {
+		in   rune
+		want string
+	}{
+		{'n', "\n"},
+		{'t', "\t"},
+		{'r', "\r"},
+		{'"', `"`},
+		{'\'', `'`},
+		{'\\', `\`},
+		{'U', `\U`}, // unknown escape: kept verbatim
+		{' ', `\ `}, // backslash before a space: kept verbatim
+	}
+	for _, tt := range tests {
+		if got := decodeEscape(tt.in); got != tt.want {
+			t.Errorf("decodeEscape(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }

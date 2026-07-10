@@ -107,3 +107,24 @@ func ExampleWriter() {
 	// set x = "hello world"
 	// print x
 }
+
+// ExampleReader_singleQuote shows the AllowSingleQuote option: fields wrapped in
+// single quotes are parsed like double-quoted fields, with two adjacent single
+// quotes standing for one literal single quote.
+func ExampleReader_singleQuote() {
+	r := words.NewReader(strings.NewReader(`'hello world' 'it''s'`))
+	r.AllowSingleQuote = true
+	rec, _ := r.Read()
+	fmt.Printf("%q\n", rec)
+	// Output: ["hello world" "it's"]
+}
+
+// ExampleReader_backslashEscapes shows the BackslashEscapes option: inside a
+// quoted field, backslash sequences such as \" and \n are interpreted.
+func ExampleReader_backslashEscapes() {
+	r := words.NewReader(strings.NewReader(`"a\"b\nc"`))
+	r.BackslashEscapes = true
+	rec, _ := r.Read()
+	fmt.Printf("%q\n", rec)
+	// Output: ["a\"b\nc"]
+}
