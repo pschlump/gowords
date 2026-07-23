@@ -435,6 +435,30 @@ var readWordsTests = []struct {
 		Input:  "\"a\tb\" c\n",
 		Output: [][]string{{"a\tb", "c"}},
 	},
+	{
+		// Trailing whitespace before a newline must not add an empty field.
+		Name:   "TrailingSpacesNoEmptyField",
+		Input:  "A Bb   \n",
+		Output: [][]string{{"A", "Bb"}},
+	},
+	{
+		// Trailing whitespace at end of input (no newline) likewise.
+		Name:   "TrailingSpacesNoEmptyFieldEOF",
+		Input:  "A Bb   ",
+		Output: [][]string{{"A", "Bb"}},
+	},
+	{
+		// A run of trailing tabs and spaces collapses to nothing.
+		Name:   "TrailingTabsAndSpacesNoEmptyField",
+		Input:  "A Bb \t \t\n",
+		Output: [][]string{{"A", "Bb"}},
+	},
+	{
+		// A line containing only whitespace still yields a single empty field.
+		Name:   "WhitespaceOnlyLine",
+		Input:  "A B\n   \nC D\n",
+		Output: [][]string{{"A", "B"}, {""}, {"C", "D"}},
+	},
 }
 
 func TestReadWords(t *testing.T) {

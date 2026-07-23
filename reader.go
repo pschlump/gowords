@@ -310,8 +310,8 @@ func (r *Reader) parseRecord() (fields []string, err error) {
 	r.r.UnreadRune()
 
 	// At this point we have at least one field.
-	for {
-		haveField, delim, err := r.parseField()
+	for firstField := true; ; firstField = false {
+		haveField, delim, err := r.parseField(firstField)
 		if haveField {
 			fields = append(fields, r.field.String())
 		}
@@ -325,8 +325,10 @@ func (r *Reader) parseRecord() (fields []string, err error) {
 
 // parseField parses the next field in the record. The read field is
 // located in r.field. Delim is the first character not part of the field
-// (r.Comma or '\n').
-func (r *Reader) parseField() (haveField bool, delim rune, err error) {
+// (r.Comma or '\n'). startOfRecord reports whether this is the first field of
+// the record; it is used to tell a whitespace-only line (which yields a single
+// empty field) apart from trailing whitespace after a field (which yields none).
+func (r *Reader) parseField(startOfRecord bool) (haveField bool, delim rune, err error) {
 	r.field.Reset()
 
 	r1, err := r.readRune()
@@ -334,8 +336,17 @@ func (r *Reader) parseField() (haveField bool, delim rune, err error) {
 		r1, err = r.readRune()
 	}
 
-	if err == io.EOF && r.column != 0 {
-		return true, 0, err
+	// We ran to the end of input while skipping leading whitespace, so the
+	// field buffer is empty. When Comma is not whitespace (CSV mode) that empty
+	// field is genuine — a preceding delimiter created it — so it is reported.
+	// When Comma is itself whitespace, a trailing run of whitespace is just a
+	// collapsed separator and produces no field, except at the start of a
+	// record, where a whitespace-only line yields a single empty field.
+	if err == io.EOF {
+		if r.column != 0 && (!unicode.IsSpace(r.Comma) || startOfRecord) {
+			return true, 0, err
+		}
+		return false, 0, err
 	}
 	if err != nil {
 		return false, 0, err
@@ -350,12 +361,19 @@ func (r *Reader) parseField() (haveField bool, delim rune, err error) {
 	if r.isDelim(r1) {
 		return true, r1, nil
 	}
-	// A trailing empty field, or a blank line.
+	// A blank line, a whitespace-only line, or trailing whitespace before a
+	// newline.
 	if r1 == '\n' {
+		// A truly blank line (only the newline) yields no field.
 		if r.column == 0 {
 			return false, r1, nil
 		}
-		return true, r1, nil
+		// As above: CSV mode keeps the empty field; whitespace mode keeps it
+		// only for a whitespace-only line at the start of the record.
+		if !unicode.IsSpace(r.Comma) || startOfRecord {
+			return true, r1, nil
+		}
+		return false, r1, nil
 	}
 
 	// unquoted field
